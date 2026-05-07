@@ -1,0 +1,274 @@
+from machine import Pin, I2C, PWM #i2c define parametros de pantalla, PWM ancho de pulso ajusta brillo de OLED 
+import ssd1306 #controla la OLED 
+import time
+import random # aleatorios 
+import framebuf # manejo de imagen 
+
+# definicion de la pantalla oled
+i2c = I2C(0, scl=Pin(22), sda=Pin(21), freq=400000)
+#creamos el canal para la pantalla
+# scl es reloj, sda son los datos y freq es la velocidad
+oled = ssd1306.SSD1306_I2C(128, 64, i2c)
+# tamaño de la pantalla gama de pixeles 128,64
+# se genera un fondo estatico para el juego 
+space_data = bytearray(1024) # memoria para dibujar 
+
+# coordenada de las estrellas, sale de (image2cpp)
+estrellas = [
+    (5, 5), (20, 10), (35, 3), (50, 20),
+    (70, 8), (90, 15), (110, 5), (120, 25),
+    (15, 40), (30, 50), (45, 35), (60, 55),
+    (80, 45), (95, 30), (115, 50), (100, 60)
+]
+# recorre ejes x,y 
+for x, y in estrellas:
+    index = x + (y // 8) * 128 #calcula la posicion en la memoria 
+    space_data[index] |= 1 << (y % 8) # enciende el pixel
+#convierte las coordenadas en imagen
+space_fb = framebuf.FrameBuffer(space_data, 128, 64, framebuf.MONO_VLSB) #formula
+
+# se genera el dibujo de la nave con la que vamos a jugar de forma binaria
+SPRITE_JUGADOR = [
+    "00011000",
+    "00111100",
+    "01111110",
+    "11111111",
+    "01111110",
+    "00111100",
+    "01011010",
+    "10000001"
+]
+# se generan planetas para que sean los obstaculos
+SPRITE_PLANETA = [
+    "00111100",
+    "01111110",
+    "11111111",
+    "11111111",
+    "11111111",
+    "11111111",
+    "01111110",
+    "00111100"
+]
+
+# definiciond de botones
+btn_up = Pin(27, Pin.IN, Pin.PULL_UP)
+btn_down = Pin(12, Pin.IN, Pin.PULL_UP)
+btn_start = Pin(14, Pin.IN, Pin.PULL_UP)
+
+# definicion del buzzer
+buzzer = PWM(Pin(26))
+buzzer.duty(0) 
+
+# variables generales que se van a usar
+estado = "MENU" #controla en que parte del juego estas
+modos = ["CLASICO", "TIEMPO", "HARDCORE"]
+modo_index = 0
+
+jugador_y = 30 #posicion vertical del jugador mitad de pnatalla 
+obstaculos = [] # lista para guardar coordenadas de los obstaculos 
+puntaje = 0 # puntos acumulados por el jugador 
+tiempo_inicio = 0
+tiempo_final = 0
+duracion_partida = 20 #tiempo contra reloj
+
+velocidad = 3 # velocidad de los obstaculos
+spawn_prob = 8 # probabilidad de que aparezca un obstaculo
+ultimo_nivel = 0 
+
+pausa_inicio = 0
+
+# declaracion para que funcionen los fondos y dibujos
+def draw_sprite(sprite, x, y, color=1): 
+    for row_idx, row in enumerate(sprite): #recorre filas
+        for col_idx, pixel in enumerate(row): #recorre columnas
+            if pixel == "1": #solo dibuja donde hay 1
+                oled.pixel(x + col_idx, y + row_idx, color) # coordenadas calculadas dibuja un pixel 
+
+# definicion de los sonidos del buzzer
+def beep(freq, dur):
+    buzzer.freq(freq)
+    buzzer.duty(512) #ciclo de trabajo al 50%
+    time.sleep_ms(dur)
+    buzzer.duty(0)
+
+# definicion del menu a mostrar
+def mostrar_menu():
+    oled.fill(0) # borra la pantalla
+    oled.blit(space_fb, 0, 0) #dibuja el fondo estrellas 
+
+    oled.text("MENU", 35, 5) #35,5 ubicacion del texto en pantalla 
+
+    for i, modo in enumerate(modos):
+        if i == modo_index: # inicia en 0
+            oled.text(">", 10, 20 + i * 12) #dibuja el cursor de los modos, oled_text representa la oled para dibujar texto en pantalla 
+        oled.text(modo, 25, 20 + i * 12)
+
+    oled.show() # envia la info que se dibuja a la pantalla fisica 
+
+# definicion del inicio del juego y sus modos
+def iniciar_juego(): 
+    global jugador_y, obstaculos, puntaje
+    global tiempo_inicio, estado
+    global velocidad, spawn_prob  # spawn_prob probabilidad de obstaculo 
+    global tiempo_final, ultimo_nivel
+
+# reinicia siempre las variables para comenzar un nuevo juego 
+    jugador_y = 30 #posicion de inicio 
+    obstaculos = [] # obstaculos random 
+    puntaje = 0
+    tiempo_final = 0
+    ultimo_nivel = 0
+    tiempo_inicio = time.ticks_ms() #guarda el inicio del tiempo
+    estado = "JUEGO" 
+
+    if modos[modo_index] == "CLASICO":
+        velocidad = 3
+        spawn_prob = 8
+
+    elif modos[modo_index] == "TIEMPO":
+        velocidad = 3
+        spawn_prob = 8
+
+    elif modos[modo_index] == "HARDCORE":
+        velocidad = 5
+        spawn_prob = 6 # se modifica velocidades y probabilidad de obstaculos para hacerlo mas dificil 
+
+# definicion del tiempo para poder contarlo
+def obtener_tiempo():
+    return time.ticks_diff(time.ticks_ms(), tiempo_inicio) // 1000
+
+# funcion para poder que el juego se vea en pantalla real
+def mostrar_juego():
+    tiempo_actual = obtener_tiempo() # actualiza y muestra la pantalla durante el juego 
+
+    oled.fill(0) #borra pantalla  
+    oled.blit(space_fb, 0, 0) # dibuja el fondo 
+
+    # jugador
+    draw_sprite(SPRITE_JUGADOR, 5, jugador_y) # dibuja al jugador en posicion actual 
+
+    # obstaculos
+    for obs in obstaculos:
+        draw_sprite(SPRITE_PLANETA, obs[0], obs[1])
+
+    oled.text("P:" + str(puntaje), 0, 0) #puntaje
+   # muestra puntaje y tiempo  para el modo TIEMPO y muestra tiempo restante 
+    if modos[modo_index] == "TIEMPO":
+        restante = max(0, duracion_partida - tiempo_actual)
+        oled.text("T:" + str(restante), 80, 0)
+    else:
+        oled.text("T:" + str(tiempo_actual), 80, 0)
+
+    oled.show() # actualiza la pantalla 
+
+# funcion para finalizar el juego
+def terminar_juego(): # es llamada cuando el jugador termina por tiempo o colision 
+    global estado, tiempo_final
+    tiempo_final = obtener_tiempo()
+    estado = "GAMEOVER"
+
+# funcion para que a medida que se juegue aparezcan obstaculos randoms
+def actualizar_obstaculos():
+    global puntaje, velocidad, ultimo_nivel
+
+    if random.randint(0, 10) >= spawn_prob: # genera obstaculos 
+        obstaculos.append([127, random.randint(0, 54)]) # añade nuevo obstaculo a la lista
+
+    for obs in obstaculos:
+        obs[0] -= int(velocidad) #mueve los obstaculos hacia la izquierda 
+
+    for obs in obstaculos: # si el obstaculo sale de pantalla por la izq se suma puntaje y suena el buzzer por exito 
+        if obs[0] < 0:
+            puntaje += 1 #suma el puntaje 
+            beep(1200, 20)
+
+    obstaculos[:] = [o for o in obstaculos if o[0] > -10] # elimina los obstaculos que ya salieron en pantalla
+
+    nivel_actual = puntaje // 5 # se calcula el nivel 
+    if nivel_actual > ultimo_nivel:
+        velocidad = min(8, velocidad + 1)
+        ultimo_nivel = nivel_actual # si se alcanza nuevo nivel la velocidad de obsta aumenta 1 hasta llegar a 8 
+
+    #  detecta colision
+    for obs in obstaculos:
+        if 5 < obs[0] + 8 and 13 > obs[0]: # condicion de colision en eje X 
+            if jugador_y < obs[1] + 8 and jugador_y + 8 > obs[1]: # condicion colision eje Y 
+                beep(300, 300) # si ambas condiciones son verdad suena y termina juego 
+                terminar_juego()
+
+# funcion para cuando se pierda que debe mostrar
+def mostrar_gameover():
+    oled.fill(0) # borra pantalla 
+    oled.blit(space_fb, 0, 0) # dibuja fondo 
+
+    oled.text("GAME OVER", 20, 12) 
+    oled.text("Puntos:" + str(puntaje), 10, 28)
+
+    if modos[modo_index] == "TIEMPO":
+        oled.text("Tiempo:" + str(duracion_partida), 10, 44)
+    else:
+        oled.text("Tiempo:" + str(tiempo_final), 10, 44)
+
+    oled.show()
+
+# bucle de juego 
+while True:
+
+    if estado == "MENU":
+        mostrar_menu() # muestra el menu en pantalla 
+#lee los botones para ver el estado
+        if btn_up.value() == 0: # cambia el modo index, seleccionando los modos de juego 
+            modo_index = (modo_index - 1) % len(modos)
+            beep(1000, 50) # suena buzzer despues de cada pulsacion del boton 
+            time.sleep_ms(200)
+
+        if btn_down.value() == 0:
+            modo_index = (modo_index + 1) % len(modos) #len(modos) asegura que el indice este dentro del limite de lista modos 
+            beep(1000, 50)
+            time.sleep_ms(200)
+
+        if btn_start.value() == 0:
+            beep(1500, 100) # al iniciar suena diferente 
+            iniciar_juego()
+            time.sleep_ms(300)
+
+    elif estado == "JUEGO":
+
+        if btn_up.value() == 0 and jugador_y > 0: #mover al jugador 4 pixeles arriba 
+            jugador_y -= 4
+
+        if btn_down.value() == 0 and jugador_y < 56: #mover al jugador 4 pixeles abajo 
+            jugador_y += 4
+
+        if btn_start.value() == 0:
+            pausa_inicio = time.ticks_ms() #guarda tiempo actual 
+            estado = "PAUSA"
+            time.sleep_ms(300)
+
+        actualizar_obstaculos() # genera obstaculos, los mueve a la izquierda, incrementa puntaje,aumneta dificultad 
+        mostrar_juego() # dibuja el fondo, posicion del jugador, obstaculos 
+
+        if modos[modo_index] == "TIEMPO": 
+            if obtener_tiempo() >= duracion_partida: # comprueba si la partida ya cumplio el tiempo 
+                terminar_juego() # si la cumplio termina el juego 
+
+        time.sleep_ms(80) # controla velocidad de fotograma del juego 
+
+    elif estado == "PAUSA":
+        oled.fill(0)  #borra pantalla 
+        oled.blit(space_fb, 0, 0) #dibuja fondo 
+        oled.text("PAUSA", 40, 25) # imprime texto 
+        oled.show() # lo muestra fisicamente 
+
+        if btn_start.value() == 0:
+            pausa_total = time.ticks_diff(time.ticks_ms(), pausa_inicio) # calcula duracion total de la pausa 
+            tiempo_inicio += pausa_total # compensa tiempo de inactividad 
+            estado = "JUEGO"
+            time.sleep_ms(300)
+
+    elif estado == "GAMEOVER":
+        mostrar_gameover()
+
+        if btn_start.value() == 0:
+            estado = "MENU"
+            time.sleep_ms(300)
